@@ -1,0 +1,5 @@
+# dir where wpcap.lib
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+  "-L", "native=C:/Users/User/Downloads/npcap-sdk-1.15/Lib/x64"
+]
