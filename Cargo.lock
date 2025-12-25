@@ -2855,6 +2855,7 @@ dependencies = [
 name = "rust-wireshark"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chrono",
  "eframe",
  "egui",
@@ -2866,6 +2867,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "tds-protocol",
 ]
 
 [[package]]
@@ -3213,6 +3215,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.111",
+]
+
+[[package]]
+name = "tds-protocol"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c23b35095d01f79ee431249c758a139fe0077483bf11d111ee59deedfbbc2115"
+dependencies = [
+ "bitflags 2.10.0",
+ "bytes",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

@@ -104,6 +104,13 @@ impl TcpReassembler {
             .and_then(|stream| Self::reassemble_segments(&stream.client_segments))
     }
 
+    /// 재조립된 서버→클라이언트 데이터 가져오기
+    pub fn get_server_data(&self, flow_id: &FlowId) -> Option<Vec<u8>> {
+        self.flows
+            .get(flow_id)
+            .and_then(|stream| Self::reassemble_segments(&stream.server_segments))
+    }
+
     /// 세그먼트 재조립
     fn reassemble_segments(segments: &[TcpSegment]) -> Option<Vec<u8>> {
         if segments.is_empty() {
@@ -131,19 +138,19 @@ impl TcpReassembler {
                 // 연속된 데이터
                 result.extend_from_slice(&segment.data);
                 expected_seq += segment.data.len() as u32;
-            } else {
-                // 순서가 바뀐 경우: 버퍼에 보관하고 나중에 처리
-                // 간단한 구현: 현재는 순서대로만 처리
-                if segment.seq > expected_seq {
-                    // 빈 공간 채우기 (나중에 개선 가능)
-                    result.resize((segment.seq - expected_seq) as usize, 0);
-                    result.extend_from_slice(&segment.data);
-                    expected_seq = segment.seq + segment.data.len() as u32;
-                }
+            } else if segment.seq > expected_seq {
+                // 순서가 바뀐 경우: 빈 공간이 있으면 건너뛰기
+                // (패킷 손실 또는 순서 변경 - 일단 현재까지의 데이터 반환)
+                // 실제로는 더 기다려야 할 수도 있지만, 간단한 구현을 위해 건너뛰기
+                break;
             }
         }
 
-        Some(result)
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
     }
 
     /// 모든 플로우 ID 가져오기

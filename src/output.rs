@@ -10,6 +10,9 @@ pub struct SqlEvent {
     pub tables: Vec<String>,
     pub operation: String,
     pub label: Option<String>,
+    /// 원본 TDS 패킷 바이트 데이터 (hex 표시용)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_data: Option<Vec<u8>>,
 }
 
 /// JSONL 출력기

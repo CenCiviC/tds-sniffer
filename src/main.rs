@@ -81,32 +81,29 @@ impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 캡처 시작 요청 처리
         if self.state.is_capturing && !self.state.capture_started {
+            // stop_receiver가 None이면 새로운 채널 생성 (for restart)
+            if self.stop_receiver.is_none() {
+                let (stop_tx, stop_rx) = mpsc::channel();
+                self.state.set_stop_sender(stop_tx);
+                self.stop_receiver = Some(stop_rx);
+            }
+
             if let (Some(ref interface), Some(ref sender)) =
                 (&self.state.selected_interface, &self.event_sender)
             {
                 let interface = interface.clone();
-                let use_tds = self.state.use_tds_parsing;
                 let sender = sender.clone();
                 let stop_rx = self.stop_receiver.take();
 
                 thread::spawn(move || {
-                    let mut extractor = Extractor::new(use_tds);
-                    let stop_rx = stop_rx;
-
-                    // 중지 신호를 받으면 종료
-                    let stop_handle = thread::spawn(move || {
-                        if let Some(rx) = stop_rx {
-                            let _ = rx.recv();
+                    let mut extractor = Extractor::new(true);
+                    
+                    if let Some(stop_rx) = stop_rx {
+                        // 실시간 캡처 시작 (중지 신호 receiver 전달)
+                        if let Err(e) = extractor.start_live_capture(&interface, sender, stop_rx) {
+                            eprintln!("캡처 오류: {}", e);
                         }
-                    });
-
-                    // 실시간 캡처 시작
-                    if let Err(e) = extractor.start_live_capture(&interface, sender) {
-                        eprintln!("캡처 오류: {}", e);
                     }
-
-                    // 중지 신호 대기
-                    let _ = stop_handle.join();
                 });
 
                 self.state.capture_started = true;
