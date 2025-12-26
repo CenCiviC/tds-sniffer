@@ -7,5 +7,5 @@
 [alias]
 buildr = "build --release"
 runr = "run --release"
-c = "clippy --all-targets --all-features"
-fmt = "fmt --all"
+lint = "clippy --all-targets --all-features"
+format = "fmt --all"
