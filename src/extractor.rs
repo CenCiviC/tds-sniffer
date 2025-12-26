@@ -24,9 +24,7 @@ impl Extractor {
         Ok(devices
             .into_iter()
             .map(|d| {
-                let desc = d
-                    .desc
-                    .unwrap_or_else(|| "No description".to_string());
+                let desc = d.desc.unwrap_or_else(|| "No description".to_string());
                 (d.name, desc)
             })
             .collect())
@@ -63,14 +61,22 @@ impl Extractor {
 
             match cap.next_packet() {
                 Ok(packet) => {
-                    let timestamp =
-                        packet.header.ts.tv_sec as f64 + (packet.header.ts.tv_usec as f64 / 1_000_000.0);
+                    let timestamp = packet.header.ts.tv_sec as f64
+                        + (packet.header.ts.tv_usec as f64 / 1_000_000.0);
 
                     // ============================================
                     // 1단계: 패킷 파싱 (Ethernet + IP + TCP)
                     // ============================================
-                    if let Some((flow_id, seq, data, is_client, actual_src_ip, actual_src_port, actual_dst_ip, actual_dst_port)) =
-                        Self::parse_packet_all(packet.data, timestamp)
+                    if let Some((
+                        flow_id,
+                        seq,
+                        data,
+                        is_client,
+                        actual_src_ip,
+                        actual_src_port,
+                        actual_dst_ip,
+                        actual_dst_port,
+                    )) = Self::parse_packet_all(packet.data, timestamp)
                     {
                         // 첫 번째 패킷의 타임스탬프 저장
                         flow_timestamps.entry(flow_id.clone()).or_insert(timestamp);
@@ -83,7 +89,7 @@ impl Extractor {
                         let sql_server_ports = [1433, 1434, 1436]; // 1434는 SQL Browser
                         let is_sql_server_port = sql_server_ports.contains(&flow_id.src_port)
                             || sql_server_ports.contains(&flow_id.dst_port);
-                        
+
                         if !is_sql_server_port {
                             continue; // SQL Server 포트가 아니면 건너뛰기
                         }
@@ -119,22 +125,28 @@ impl Extractor {
                         if !is_client {
                             if let Some(server_data) = self.reassembler.get_server_data(&flow_id) {
                                 // TDS 패킷인지 먼저 확인 (최소 8바이트 필요)
-                                if server_data.len() >= 8 && TdsParser::looks_like_tds(&server_data) {
+                                if server_data.len() >= 8 && TdsParser::looks_like_tds(&server_data)
+                                {
                                     // 여러 TDS 패킷이 연속으로 붙어있을 수 있으므로 프레이밍 루프로 처리
-                                    let (decoded_texts, raw_packets) = TdsParser::decode_tds_packets_with_raw(&server_data);
-                                    
-                                    for (decoded_text, raw_data) in decoded_texts.into_iter().zip(raw_packets.into_iter()) {
+                                    let (decoded_texts, raw_packets) =
+                                        TdsParser::decode_tds_packets_with_raw(&server_data);
+
+                                    for (decoded_text, raw_data) in
+                                        decoded_texts.into_iter().zip(raw_packets.into_iter())
+                                    {
                                         // 빈 텍스트나 너무 짧은 텍스트는 건너뛰기
                                         let trimmed = decoded_text.trim();
                                         if trimmed.len() < 3 {
                                             continue;
                                         }
-                                        
+
                                         let timestamp_sec =
                                             flow_timestamps.get(&flow_id).copied().unwrap_or(0.0);
                                         let timestamp = chrono::DateTime::from_timestamp(
                                             timestamp_sec as i64,
-                                            ((timestamp_sec - timestamp_sec.floor()) * 1_000_000_000.0) as u32,
+                                            ((timestamp_sec - timestamp_sec.floor())
+                                                * 1_000_000_000.0)
+                                                as u32,
                                         )
                                         .unwrap_or_default();
 
@@ -174,7 +186,7 @@ impl Extractor {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -183,7 +195,11 @@ impl Extractor {
     /// ============================================
     /// 모든 TCP 패킷을 처리 (TDS 필터링 없음)
     /// 반환값: (FlowId, 시퀀스 번호, 페이로드, 클라이언트→서버 여부, 실제 src_ip, 실제 src_port, 실제 dst_ip, 실제 dst_port)
-    fn parse_packet_all(data: &[u8], _timestamp: f64) -> Option<(FlowId, u32, Vec<u8>, bool, IpAddr, u16, IpAddr, u16)> {
+    #[allow(clippy::type_complexity)]
+    fn parse_packet_all(
+        data: &[u8],
+        _timestamp: f64,
+    ) -> Option<(FlowId, u32, Vec<u8>, bool, IpAddr, u16, IpAddr, u16)> {
         // Ethernet 헤더 (14 bytes) 건너뛰기
         if data.len() < 14 {
             return None;
@@ -255,8 +271,8 @@ impl Extractor {
         let is_client = flow_id.is_client_to_server(src_ip, src_port);
 
         // 실제 패킷 방향 정보도 함께 반환 (GUI 표시용)
-        Some((flow_id, seq, payload, is_client, src_ip, src_port, dst_ip, dst_port))
+        Some((
+            flow_id, seq, payload, is_client, src_ip, src_port, dst_ip, dst_port,
+        ))
     }
-
-
 }

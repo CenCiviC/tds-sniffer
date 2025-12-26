@@ -1,6 +1,6 @@
 use rust_wireshark::gui::GuiState;
-use rust_wireshark::Extractor;
 use rust_wireshark::output::SqlEvent;
+use rust_wireshark::Extractor;
 use std::sync::mpsc;
 use std::thread;
 
@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options,
         Box::new(|cc| {
             // 한글 폰트 설정
-            let mut fonts = egui::FontDefinitions::default();
+            let fonts = egui::FontDefinitions::default();
 
             // Windows 시스템 폰트 경로 시도
             #[cfg(target_os = "windows")]
@@ -27,17 +27,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 여러 한글 폰트 경로 시도
                 let font_paths = [
                     "C:/Windows/Fonts/malgun.ttf", // 맑은 고딕
-                    "C:/Windows/Fonts/gulim.ttc", // 굴림
+                    "C:/Windows/Fonts/gulim.ttc",  // 굴림
                     "C:/Windows/Fonts/batang.ttc", // 바탕
                 ];
 
                 for font_path in &font_paths {
                     if Path::new(font_path).exists() {
                         if let Ok(font_data) = std::fs::read(font_path) {
-                            fonts.font_data.insert(
-                                "Korean".to_owned(),
-                                egui::FontData::from_owned(font_data),
-                            );
+                            fonts
+                                .font_data
+                                .insert("Korean".to_owned(), egui::FontData::from_owned(font_data));
                             fonts
                                 .families
                                 .get_mut(&egui::FontFamily::Proportional)
@@ -97,7 +96,7 @@ impl eframe::App for GuiApp {
 
                 thread::spawn(move || {
                     let mut extractor = Extractor::new(true);
-                    
+
                     if let Some(stop_rx) = stop_rx {
                         // 실시간 캡처 시작 (중지 신호 receiver 전달)
                         if let Err(e) = extractor.start_live_capture(&interface, sender, stop_rx) {

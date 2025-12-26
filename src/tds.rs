@@ -62,26 +62,23 @@ impl TdsParser {
         if bytes.len() < 8 {
             return false;
         }
-        
+
         // 첫 번째 바이트가 0x01 (SQL Batch) 또는 0x03 (RPC)인지 확인
         // SQL 추출에 필요한 패킷 타입만 필터링
         let packet_type_byte = bytes[0];
         if packet_type_byte != 0x01 && packet_type_byte != 0x03 {
             return false;
         }
-        
+
         // tds-protocol 라이브러리를 사용하여 헤더 파싱
         let mut buf = &bytes[..8];
         let header = match PacketHeader::decode(&mut buf) {
             Ok(h) => h,
             Err(_) => return false,
         };
-        
+
         // SQL Batch (0x01) 또는 RPC (0x03) 패킷만 허용
-        matches!(
-            header.packet_type,
-            PacketType::SqlBatch | PacketType::Rpc
-        )
+        matches!(header.packet_type, PacketType::SqlBatch | PacketType::Rpc)
     }
 
     /// ============================================
@@ -115,7 +112,7 @@ impl TdsParser {
 
         // 헤더 파싱
         let header = Self::parse_header(data)?;
-        
+
         // 패킷 길이 확인
         if data.len() < header.length as usize {
             // 패킷이 완전하지 않을 수 있음
@@ -124,20 +121,21 @@ impl TdsParser {
 
         // 본문 시작 위치 결정
         // SQLBatch (0x01)와 RPCRequest (0x03)의 경우 AllHeaders 섹션이 있을 수 있음
-        let body_start = if (header.packet_type == TdsPacketType::SqlBatch || header.packet_type == TdsPacketType::RpcRequest) 
-            && data.len() >= 12 {
+        let body_start = if (header.packet_type == TdsPacketType::SqlBatch
+            || header.packet_type == TdsPacketType::RpcRequest)
+            && data.len() >= 12
+        {
             // AllHeaders TotalLength를 동적으로 읽기
             // TDS 헤더(8바이트) 뒤의 4바이트가 AllHeaders TotalLength (little-endian)
-            let all_headers_total = u32::from_le_bytes([
-                data[8],
-                data[9],
-                data[10],
-                data[11],
-            ]) as usize;
-            
+            let all_headers_total =
+                u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+
             // AllHeaders가 있는 경우: 헤더(8) + AllHeaders TotalLength
             // AllHeaders가 없는 경우: all_headers_total이 0이거나 매우 작은 값
-            if all_headers_total > 0 && all_headers_total <= 65535 && data.len() >= 8 + all_headers_total {
+            if all_headers_total > 0
+                && all_headers_total <= 65535
+                && data.len() >= 8 + all_headers_total
+            {
                 8 + all_headers_total
             } else {
                 // AllHeaders가 없거나 잘못된 경우: 헤더 바로 다음
@@ -170,7 +168,7 @@ impl TdsParser {
         if bytes.is_empty() {
             return None;
         }
-        
+
         // TDS 헤더가 있는 경우 제거
         let data = if bytes.len() > 8 && Self::looks_like_tds(bytes) {
             // tds-protocol을 사용하여 헤더 확인
@@ -180,15 +178,14 @@ impl TdsParser {
                     // SQLBatch 패킷의 경우 AllHeaders 섹션 건너뛰기
                     if header.packet_type == PacketType::SqlBatch && bytes.len() >= 12 {
                         // AllHeaders TotalLength를 동적으로 읽기
-                        let all_headers_total = u32::from_le_bytes([
-                            bytes[8],
-                            bytes[9],
-                            bytes[10],
-                            bytes[11],
-                        ]) as usize;
-                        
+                        let all_headers_total =
+                            u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
+
                         // AllHeaders가 있는 경우: 헤더(8) + AllHeaders TotalLength
-                        if all_headers_total > 0 && all_headers_total <= 65535 && bytes.len() >= 8 + all_headers_total {
+                        if all_headers_total > 0
+                            && all_headers_total <= 65535
+                            && bytes.len() >= 8 + all_headers_total
+                        {
                             &bytes[8 + all_headers_total..]
                         } else {
                             // AllHeaders가 없거나 잘못된 경우: 헤더 바로 다음
@@ -203,41 +200,42 @@ impl TdsParser {
         } else {
             bytes
         };
-        
+
         if data.is_empty() {
             return None;
         }
-        
+
         // UTF-16은 2바이트 단위이므로 홀수 길이 처리
         let data = if data.len() % 2 != 0 {
             &data[..data.len() - 1]
         } else {
             data
         };
-        
+
         if data.is_empty() {
             return None;
         }
-        
+
         // UTF-16LE 디코딩
         let (decoded, _, _had_errors) = UTF_16LE.decode(data);
         let result = decoded.into_owned();
-        
+
         // 결과 검증: 너무 짧거나 제어 문자가 너무 많으면 무시
         let trimmed = result.trim();
         if trimmed.len() < 3 {
             return None;
         }
-        
+
         // 출력 가능한 문자 비율 확인
-        let printable_count = trimmed.chars()
+        let printable_count = trimmed
+            .chars()
             .filter(|c| !c.is_control() || c.is_whitespace())
             .count();
-        
+
         if printable_count * 2 < trimmed.chars().count() {
             return None; // 제어 문자가 50% 이상이면 무시
         }
-        
+
         Some(result)
     }
 
@@ -290,14 +288,14 @@ impl TdsParser {
 
         // ALL_HEADERS 건너뛰기 (TDS 7.2+)
         if pos + 4 <= data.len() {
-            let total_header_len = u32::from_le_bytes([
-                data[pos],
-                data[pos + 1],
-                data[pos + 2],
-                data[pos + 3],
-            ]) as usize;
-            
-            if total_header_len > 0 && total_header_len <= 65535 && pos + total_header_len <= data.len() {
+            let total_header_len =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
+
+            if total_header_len > 0
+                && total_header_len <= 65535
+                && pos + total_header_len <= data.len()
+            {
                 pos += total_header_len;
             }
         }
@@ -326,11 +324,11 @@ impl TdsParser {
             }
             let name_len = data[pos] as usize;
             pos += 1;
-            
+
             if pos + name_len * 2 > data.len() {
                 return None;
             }
-            
+
             let name_bytes = &data[pos..pos + name_len * 2];
             let (name, _, _) = UTF_16LE.decode(name_bytes);
             debug!("RPC ProcName: {}", name);
@@ -346,7 +344,7 @@ impl TdsParser {
 
         // 파라미터 반복 파싱
         let mut sql_parts = Vec::new();
-        
+
         while pos < packet_length && pos < data.len() {
             // ParamName 파싱
             if pos >= data.len() {
@@ -386,7 +384,7 @@ impl TdsParser {
                     }
                     let _max_len = u16::from_le_bytes([data[pos], data[pos + 1]]);
                     pos += 7; // 2 + 5
-                    
+
                     // DataLength + Data 파싱
                     if pos + 2 > data.len() {
                         break;
@@ -407,7 +405,7 @@ impl TdsParser {
                     pos += data_len;
 
                     // NVARCHAR는 UTF-16LE로 디코딩
-                    if data_bytes.len() % 2 == 0 {
+                    if data_bytes.len().is_multiple_of(2) {
                         let (decoded, _, _) = UTF_16LE.decode(data_bytes);
                         let trimmed = decoded.trim();
                         if !trimmed.is_empty() {
@@ -428,7 +426,7 @@ impl TdsParser {
                     let _max_len = u16::from_le_bytes([data[pos], data[pos + 1]]);
                     let _collation = &data[pos + 2..pos + 7];
                     pos += 7;
-                    
+
                     // DataLength + Data 파싱
                     if pos + 2 > data.len() {
                         break;
@@ -545,11 +543,12 @@ impl TdsParser {
         }
 
         // @stmt가 있으면 그것을 메인으로, 나머지는 파라미터로
-        let result = if sql_parts.len() > 1 && sql_parts[0].starts_with("SELECT") 
-            || sql_parts[0].starts_with("INSERT") 
-            || sql_parts[0].starts_with("UPDATE") 
-            || sql_parts[0].starts_with("DELETE") 
-            || sql_parts[0].starts_with("EXEC") {
+        let result = if sql_parts.len() > 1 && sql_parts[0].starts_with("SELECT")
+            || sql_parts[0].starts_with("INSERT")
+            || sql_parts[0].starts_with("UPDATE")
+            || sql_parts[0].starts_with("DELETE")
+            || sql_parts[0].starts_with("EXEC")
+        {
             format!("{} -- {}", sql_parts[0], sql_parts[1..].join(", "))
         } else {
             sql_parts.join(" | ")
@@ -589,7 +588,7 @@ impl TdsParser {
                 buf = &buf[1..];
                 continue;
             }
-            
+
             // 1단계: 헤더 파싱
             let mut header_buf = &buf[..8];
             let header = match PacketHeader::decode(&mut header_buf) {
@@ -636,5 +635,4 @@ impl TdsParser {
 
         (decoded_results, raw_results)
     }
-
 }
