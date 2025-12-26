@@ -5,6 +5,13 @@ use std::sync::mpsc;
 use std::thread;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Windows 플랫폼 확인
+    if !cfg!(target_os = "windows") {
+        eprintln!("오류: 이 프로그램은 Windows에서만 실행할 수 있습니다.");
+        eprintln!("Error: This program can only run on Windows.");
+        std::process::exit(1);
+    }
+
     env_logger::init();
 
     let options = eframe::NativeOptions {
@@ -16,10 +23,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "MSSQL TDS SQL 추출기",
         options,
         Box::new(|cc| {
-            let fonts = egui::FontDefinitions::default();
+            let mut fonts = egui::FontDefinitions::default();
 
             // Windows system font path trial
-            #[cfg(target_os = "windows")]
             {
                 use std::path::Path;
 
