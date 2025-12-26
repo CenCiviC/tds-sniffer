@@ -1,6 +1,6 @@
-use crate::output::SqlEvent;
 use crate::tcp::{FlowId, TcpReassembler};
 use crate::tds::TdsParser;
+use crate::SqlEvent;
 use std::net::IpAddr;
 use std::sync::mpsc;
 
@@ -82,16 +82,17 @@ impl Extractor {
                         flow_timestamps.entry(flow_id.clone()).or_insert(timestamp);
 
                         // ============================================
-                        // 2단계: SQL Server 포트 필터링 (1433 또는 다른 포트)
+                        // 2단계: SQL Server 포트 필터링
                         // ============================================
                         // TCP 세그먼트가 쪼개져 있을 수 있으므로 재조립 전에 TDS 체크하지 않음
                         // 대신 포트 기반으로 필터링 (SQL Server 기본 포트: 1433)
+                        // NOTE: 추가적으로 port 설정을 하고 있다면 추가해야할 수도 있음
                         let sql_server_ports = [1433, 1434, 1436]; // 1434는 SQL Browser
                         let is_sql_server_port = sql_server_ports.contains(&flow_id.src_port)
                             || sql_server_ports.contains(&flow_id.dst_port);
 
                         if !is_sql_server_port {
-                            continue; // SQL Server 포트가 아니면 건너뛰기
+                            continue;
                         }
 
                         // ============================================
@@ -121,15 +122,16 @@ impl Extractor {
                         // ============================================
                         // 4단계: 재조립된 스트림에서 TDS 데이터 디코딩
                         // ============================================
-                        // 서버→클라이언트 방향 데이터만 처리 (응답 패킷)
-                        if !is_client {
-                            if let Some(server_data) = self.reassembler.get_server_data(&flow_id) {
-                                // TDS 패킷인지 먼저 확인 (최소 8바이트 필요)
-                                if server_data.len() >= 8 && TdsParser::looks_like_tds(&server_data)
+
+                        // NOTE: Dentweb SQL Batch only exists at client to server flow
+                        if is_client {
+                            if let Some(client_data) = self.reassembler.get_client_data(&flow_id) {
+                                // TDS 패킷인지 먼저 확인
+                                if TdsParser::looks_like_tds(&client_data)
                                 {
                                     // 여러 TDS 패킷이 연속으로 붙어있을 수 있으므로 프레이밍 루프로 처리
                                     let (decoded_texts, raw_packets) =
-                                        TdsParser::decode_tds_packets_with_raw(&server_data);
+                                        TdsParser::decode_tds_packets_with_raw(&client_data);
 
                                     for (decoded_text, raw_data) in
                                         decoded_texts.into_iter().zip(raw_packets.into_iter())
@@ -150,7 +152,7 @@ impl Extractor {
                                         )
                                         .unwrap_or_default();
 
-                                        // 실제 패킷 방향 정보 사용 (서버→클라이언트)
+                                        // 실제 패킷 정보 
                                         let event = SqlEvent {
                                             timestamp,
                                             flow_id: format!(

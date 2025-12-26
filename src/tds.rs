@@ -56,7 +56,6 @@ impl TdsParser {
     /// ============================================
     /// TCP 페이로드가 TDS 프로토콜 패킷인지 확인
     /// 첫 번째 바이트가 0x01 (SQL Batch) 또는 0x03 (RPC)인 패킷만 처리
-    /// tds-protocol 라이브러리를 사용하여 헤더 파싱
     pub fn looks_like_tds(bytes: &[u8]) -> bool {
         // 최소 헤더 크기 확인 (TDS 헤더는 8바이트)
         if bytes.len() < 8 {
@@ -70,7 +69,7 @@ impl TdsParser {
             return false;
         }
 
-        // tds-protocol 라이브러리를 사용하여 헤더 파싱
+        // Parse header
         let mut buf = &bytes[..8];
         let header = match PacketHeader::decode(&mut buf) {
             Ok(h) => h,

@@ -16,15 +16,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "MSSQL TDS SQL 추출기",
         options,
         Box::new(|cc| {
-            // 한글 폰트 설정
             let fonts = egui::FontDefinitions::default();
 
-            // Windows 시스템 폰트 경로 시도
+            // Windows system font path trial
             #[cfg(target_os = "windows")]
             {
                 use std::path::Path;
 
-                // 여러 한글 폰트 경로 시도
                 let font_paths = [
                     "C:/Windows/Fonts/malgun.ttf", // 맑은 고딕
                     "C:/Windows/Fonts/gulim.ttc",  // 굴림
@@ -50,15 +48,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             cc.egui_ctx.set_fonts(fonts);
 
-            // 실시간 이벤트 채널
+            // Real-time event channel(thread)
             let (event_tx, event_rx) = mpsc::channel();
-            // 중지 신호 채널
+            // Stop signal channel(thread)
             let (stop_tx, stop_rx) = mpsc::channel();
 
             let mut state = GuiState::new();
             state.set_event_receiver(event_rx);
             state.set_stop_sender(stop_tx);
-
             Box::new(GuiApp {
                 state,
                 event_sender: Some(event_tx),
@@ -78,9 +75,9 @@ struct GuiApp {
 
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 캡처 시작 요청 처리
+        // Handle capture start request
         if self.state.is_capturing && !self.state.capture_started {
-            // stop_receiver가 None이면 새로운 채널 생성 (for restart)
+            // If stop_receiver is None, create a new channel (for restart)
             if self.stop_receiver.is_none() {
                 let (stop_tx, stop_rx) = mpsc::channel();
                 self.state.set_stop_sender(stop_tx);
@@ -98,7 +95,7 @@ impl eframe::App for GuiApp {
                     let mut extractor = Extractor::new(true);
 
                     if let Some(stop_rx) = stop_rx {
-                        // 실시간 캡처 시작 (중지 신호 receiver 전달)
+                        // Start real-time capture (pass stop signal receiver)
                         if let Err(e) = extractor.start_live_capture(&interface, sender, stop_rx) {
                             eprintln!("캡처 오류: {}", e);
                         }

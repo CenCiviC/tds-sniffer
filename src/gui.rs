@@ -1,5 +1,4 @@
-use crate::output::SqlEvent;
-use crate::Extractor;
+use crate::{Extractor, SqlEvent};
 use egui::{CentralPanel, Color32, RichText, ScrollArea, SidePanel, TextEdit, TopBottomPanel};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
