@@ -2,7 +2,7 @@
 
 pcap/pcapng 파일에서 MSSQL TDS 프로토콜의 SQL 쿼리를 추출하는 Rust 도구입니다.
 > [!CAUTION]
-> 해당 프로그램은 윈도우 전용 프로그램입니다.
+> 해당 프로그램은 윈도우 전용 프로그램입니다.  
 > mac에서 개발은 가능하지만 실행은 윈도우에서 해주세요.
 
 ## 사용법
@@ -14,7 +14,8 @@ pcap/pcapng 파일에서 MSSQL TDS 프로토콜의 SQL 쿼리를 추출하는 Ru
 - window : `https://win.rustup.rs/`에 접속 후 실행
 
 > [!NOTE]
-> rustup을 쓰기 싫은경우, 각 시스템에 기본으로 탑재되어있는 패키지매니저를 사용하여 설치해도 됩니다. 그러나 이와 같은 방식으로 설치할경우, 상당히 늦은 버전의 Rust가 설치되므로 주의하세요.
+> rustup을 쓰기 싫은경우, 각 시스템에 기본으로 탑재되어있는 패키지매니저를 사용하여 설치해도 됩니다.  
+> 그러나 이와 같은 방식으로 설치할경우, 상당히 늦은 버전의 Rust가 설치되므로 주의하세요.
 >
 > ```bash
 > # 초기 세팅
@@ -34,9 +35,25 @@ pcap/pcapng 파일에서 MSSQL TDS 프로토콜의 SQL 쿼리를 추출하는 Ru
 > ```
 
 ### npcap(window)
-https://npcap.com/
-에서 installer 다운 및 실행 이때 WinPcap API-compatible Mode 체크 해야됨
-또한 SDK 실행 받아서 
+1. [Npcap](https://npcap.com/#download)에서 installer 다운로드 및 실행
+   - 설치 시 **WinPcap API-compatible Mode** 체크 필수
+2. [Npcap SDK](https://npcap.com/#download)에서 Npcap SDK 다운로드
+3. **LIB 환경 변수 설정**:
+   - SDK의 `/Lib` 또는 `/Lib/x64` 폴더를 LIB 환경 변수에 추가
+   - **CMD에서 임시 설정**:
+     ```cmd
+     set LIB=%LIB%;C:\Users\User\Downloads\npcap-sdk-1.15\Lib\x64
+     ```
+   - **PowerShell에서 임시 설정**:
+     ```powershell
+     $env:LIB += ";C:\Users\User\Downloads\npcap-sdk-1.15\Lib\x64"
+     ```
+   - **영구 설정** (시스템 환경 변수):
+     - 제어판 → 시스템 → 고급 시스템 설정 → 환경 변수
+     - 시스템 변수에서 `LIB` 선택 → 편집 → 새로 만들기로 SDK 경로 추가 
+  > [!NOTE] 
+  > .cargo/config.toml에서 정적 링크 설정도 가능합니다.
+  >
 
 ### 실행
 ```bash

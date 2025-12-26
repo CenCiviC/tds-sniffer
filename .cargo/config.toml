@@ -1,5 +1,11 @@
-# dir where wpcap.lib
-[target.x86_64-pc-windows-msvc]
-rustflags = [
-  "-L", "native=C:/Users/User/Downloads/npcap-sdk-1.15/Lib/x64"
-]
+# Path to wpcap.lib (for manually linking without setting an environment variable)
+# [target.x86_64-pc-windows-msvc]
+# rustflags = [
+#   "-L", "native=C:/Users/User/Downloads/npcap-sdk-1.15/Lib/x64"
+# ]
+
+[alias]
+buildr = "build --release"
+runr = "run --release"
+c = "clippy --all-targets --all-features"
+fmt = "fmt --all"
