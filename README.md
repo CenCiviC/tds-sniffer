@@ -40,13 +40,11 @@ pcap/pcapng 파일에서 MSSQL TDS 프로토콜의 SQL 쿼리를 추출하는 Ru
 2. [Npcap SDK](https://npcap.com/#download)에서 Npcap SDK 다운로드
 3. **LIB 환경 변수 설정**:
    - SDK의 `/Lib` 또는 `/Lib/x64` 폴더를 LIB 환경 변수에 추가
-   - **CMD에서 임시 설정**:
-     ```cmd
-     set LIB=%LIB%;C:\Users\User\Downloads\npcap-sdk-1.15\Lib\x64
-     ```
    - **PowerShell에서 임시 설정**:
-     ```powershell
-     $env:LIB += ";C:\Users\User\Downloads\npcap-sdk-1.15\Lib\x64"
+     ```bash
+     $env:LIB += ";<npcap 설치경로>"
+
+     # ex: $env:LIB += ";C:\Users\User\Downloads\npcap-sdk-1.15\Lib\x64"
      ```
    - **영구 설정** (시스템 환경 변수):
      - 제어판 → 시스템 → 고급 시스템 설정 → 환경 변수
