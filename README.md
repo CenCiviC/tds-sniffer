@@ -7,6 +7,10 @@ pcap/pcapng 파일에서 MSSQL TDS 프로토콜의 SQL 쿼리를 추출하는 Ru
 
 ## 사용법
 
+## Demo
+![records](https://github.com/user-attachments/assets/d1a66b05-5787-48b2-9815-62270ba885a6)
+
+
 ### Pre-requisties
 
 #### rust(rustup)
