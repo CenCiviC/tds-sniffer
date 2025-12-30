@@ -1,2 +1,5 @@
 # Ignore all files in the target directory
 target/
+
+# Logs directory
+log/

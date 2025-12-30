@@ -1,6 +1,8 @@
-use crate::{Extractor, SqlEvent};
+use crate::{
+    extract_operations, extract_table_name, extract_tables_from_sql, Extractor, SqlEvent, SqlLogger,
+};
 use egui::{CentralPanel, Color32, RichText, ScrollArea, SidePanel, TextEdit, TopBottomPanel};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::mpsc;
 
 /// 뷰 모드
@@ -31,6 +33,7 @@ pub struct GuiState {
     available_interfaces: Vec<(String, String)>, // (이름, 설명)
     event_receiver: Option<mpsc::Receiver<SqlEvent>>,
     stop_sender: Option<mpsc::Sender<()>>,
+    logger: SqlLogger, // SQL 이벤트 로거
 }
 
 impl GuiState {
@@ -54,86 +57,8 @@ impl GuiState {
             available_interfaces: interfaces,
             event_receiver: None,
             stop_sender: None,
+            logger: SqlLogger::new(),
         }
-    }
-
-    /// 테이블명에서 TB_ 다음 부분 추출
-    /// 예: "dbo.TB_PI치료계획세부내역" -> "PI치료계획세부내역"
-    fn extract_table_name(table: &str) -> String {
-        // 스키마.테이블명 형식 처리
-        let parts: Vec<&str> = table.split('.').collect();
-        let table_part = if parts.len() > 1 {
-            parts.last().unwrap_or(&table)
-        } else {
-            table
-        };
-
-        // TB_ 다음 부분 찾기
-        if let Some(pos) = table_part.find("TB_") {
-            table_part[pos + 3..].to_string()
-        } else {
-            table_part.to_string()
-        }
-    }
-
-    /// SQL 텍스트에서 테이블명 추출
-    /// FROM, UPDATE, INSERT INTO, JOIN 절에서 테이블명 찾기
-    /// 한글 테이블명도 지원 (예: dbo.TB_진료내역, DentWeb.dbo.TB_작업로그)
-    fn extract_tables_from_sql(sql_text: &str) -> Vec<String> {
-        use regex::Regex;
-        let mut tables = HashSet::new();
-
-        // 테이블명 패턴: database.schema.table 또는 schema.table 또는 table
-        // 한글, 영문, 숫자, 언더스코어, 점 허용
-        // FROM, UPDATE, INSERT INTO, JOIN 뒤에 오는 테이블명 추출
-        // 최대 2개의 점 허용 (database.schema.table 형식 지원)
-        let patterns = vec![
-            (
-                r"(?i)\bFROM\s+([a-zA-Z_가-힣][a-zA-Z0-9_가-힣]*(?:\.[a-zA-Z_가-힣][a-zA-Z0-9_가-힣]*){0,2})",
-                "FROM",
-            ),
-            (
-                r"(?i)\bUPDATE\s+([a-zA-Z_가-힣][a-zA-Z0-9_가-힣]*(?:\.[a-zA-Z_가-힣][a-zA-Z0-9_가-힣]*){0,2})",
-                "UPDATE",
-            ),
-            (
-                r"(?i)\bINSERT\s+INTO\s+([a-zA-Z_가-힣][a-zA-Z0-9_가-힣]*(?:\.[a-zA-Z_가-힣][a-zA-Z0-9_가-힣]*){0,2})",
-                "INSERT INTO",
-            ),
-            (
-                r"(?i)\bJOIN\s+([a-zA-Z_가-힣][a-zA-Z0-9_가-힣]*(?:\.[a-zA-Z_가-힣][a-zA-Z0-9_가-힣]*){0,2})",
-                "JOIN",
-            ),
-        ];
-
-        for (pattern, _) in patterns {
-            if let Ok(re) = Regex::new(pattern) {
-                for cap in re.captures_iter(sql_text) {
-                    if let Some(table) = cap.get(1) {
-                        tables.insert(table.as_str().to_string());
-                    }
-                }
-            }
-        }
-
-        tables.into_iter().collect()
-    }
-
-    /// SQL 텍스트에서 모든 operation 추출
-    /// 한 쿼리에 여러 operation이 있을 수 있음
-    fn extract_operations(sql_text: &str) -> Vec<String> {
-        let mut operations = HashSet::new();
-        let upper_sql = sql_text.to_uppercase();
-
-        // 각 operation 키워드 확인
-        let keywords = ["SELECT", "INSERT", "UPDATE", "DELETE", "EXEC", "EXECUTE"];
-        for keyword in keywords {
-            if upper_sql.contains(keyword) {
-                operations.insert(keyword.to_string());
-            }
-        }
-
-        operations.into_iter().collect()
     }
 
     /// 이벤트 수신기 설정
@@ -162,9 +87,18 @@ impl GuiState {
         self.show_details = None;
         self.show_raw = None;
 
+        // 로그 파일 생성
+        match self.logger.start_capture(self.selected_interface.as_ref()) {
+            Ok(log_filename) => {
+                self.processing_status = format!("캡처 시작 중... (로그: {})", log_filename);
+            }
+            Err(e) => {
+                self.processing_status = format!("캡처 시작 중... (로그 파일 생성 실패: {})", e);
+            }
+        }
+
         self.is_capturing = true;
         self.capture_started = false;
-        self.processing_status = "캡처 시작 중...".to_string();
     }
 
     /// 캡처 중지
@@ -177,9 +111,22 @@ impl GuiState {
             let _ = sender.send(());
         }
 
+        // 로그 파일에 종료 메시지 작성
+        self.logger.stop_capture(self.events.len());
+
+        let log_file_info = if let Some(path) = self.logger.get_file_path() {
+            format!(" (로그: {})", path)
+        } else {
+            String::new()
+        };
+
         self.is_capturing = false;
         self.capture_started = false;
-        self.processing_status = format!("캡처 중지됨 (총 {}개 이벤트)", self.events.len());
+        self.processing_status = format!(
+            "캡처 중지됨 (총 {}개 이벤트){}",
+            self.events.len(),
+            log_file_info
+        );
     }
 
     /// 새 이벤트 추가 (중복 제거 및 그룹화)
@@ -199,10 +146,15 @@ impl GuiState {
 
         let event = &self.events[unique_idx];
 
+        // 새로운 고유 SQL이 추가되었을 때만 로깅
+        if unique_idx == self.events.len() - 1 {
+            self.logger.log_event(event);
+        }
+
         // 테이블별 그룹화 (TB_ 다음 부분이 테이블명)
         // event.tables가 비어있으면 SQL 텍스트에서 직접 추출
         let tables = if event.tables.is_empty() {
-            Self::extract_tables_from_sql(&event.sql_text)
+            extract_tables_from_sql(&event.sql_text)
         } else {
             event.tables.clone()
         };
@@ -215,7 +167,7 @@ impl GuiState {
             }
         } else {
             for table in &tables {
-                let table_name = Self::extract_table_name(table);
+                let table_name = extract_table_name(table);
                 let group = self.table_groups.entry(table_name).or_default();
                 if !group.contains(&unique_idx) {
                     group.push(unique_idx);
@@ -224,7 +176,7 @@ impl GuiState {
         }
 
         // SQL별 그룹화 (한 쿼리에 여러 operation이 있으면 각 그룹에 포함)
-        let operations = Self::extract_operations(&event.sql_text);
+        let operations = extract_operations(&event.sql_text);
         if operations.is_empty() {
             // operation이 없으면 기존 operation 필드 사용
             let group = self

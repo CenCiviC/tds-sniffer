@@ -127,8 +127,7 @@ impl Extractor {
                         if is_client {
                             if let Some(client_data) = self.reassembler.get_client_data(&flow_id) {
                                 // TDS 패킷인지 먼저 확인
-                                if TdsParser::looks_like_tds(&client_data)
-                                {
+                                if TdsParser::looks_like_tds(&client_data) {
                                     // 여러 TDS 패킷이 연속으로 붙어있을 수 있으므로 프레이밍 루프로 처리
                                     let (decoded_texts, raw_packets) =
                                         TdsParser::decode_tds_packets_with_raw(&client_data);
@@ -152,7 +151,7 @@ impl Extractor {
                                         )
                                         .unwrap_or_default();
 
-                                        // 실제 패킷 정보 
+                                        // 실제 패킷 정보
                                         let event = SqlEvent {
                                             timestamp,
                                             flow_id: format!(
