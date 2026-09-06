@@ -1,640 +1,605 @@
-use crate::{
-    extract_operations, extract_table_name, extract_tables_from_sql, Extractor, SqlEvent, SqlLogger,
-};
-use egui::{CentralPanel, Color32, RichText, ScrollArea, SidePanel, TextEdit, TopBottomPanel};
-use std::collections::HashMap;
-use std::sync::mpsc;
+use crate::capture::{Capture, CaptureStatus, Interfaces};
+use crate::output::{hex_dump, SqlEvent, SqlOp};
+use crate::store::{EventIdx, EventStore};
+use egui::{CentralPanel, Color32, Context, RichText, ScrollArea, SidePanel, TextEdit, Ui};
 
-/// 뷰 모드
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ViewMode {
+/// 사이드바 그룹화 기준.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
     ByTable,
-    BySql,
+    ByOperation,
 }
 
-/// GUI 상태
-pub struct GuiState {
-    events: Vec<SqlEvent>,
-    // 중복 제거를 위한 SQL 텍스트 -> 이벤트 인덱스 매핑
-    unique_sql_map: HashMap<String, usize>, // sql_text -> 첫 번째 이벤트 인덱스
-    // 테이블별 그룹화 (TB_ 다음 부분이 테이블명)
-    table_groups: HashMap<String, Vec<usize>>, // 테이블명 -> 고유 SQL 인덱스들
-    // SQL별 그룹화
-    operation_groups: HashMap<String, Vec<usize>>, // operation -> 고유 SQL 인덱스들
+/// 사용자가 무엇을 보고 있는지. 도메인 데이터를 전혀 소유하지 않는다.
+///
+/// 저장소와 타입이 분리되어 있어 `&EventStore`와 `&mut Selection`을 동시에
+/// 넘길 수 있고, 그래서 렌더링 경로에 방어적 복사가 없다.
+pub struct Selection {
     view_mode: ViewMode,
-    selected_table: Option<String>,
-    selected_operation: Option<String>,
-    show_details: Option<usize>,
-    show_raw: Option<usize>,
-    pub is_capturing: bool,
-    pub capture_started: bool,
-    processing_status: String,
-    pub selected_interface: Option<String>, // 인터페이스 이름만 저장
-    available_interfaces: Vec<(String, String)>, // (이름, 설명)
-    event_receiver: Option<mpsc::Receiver<SqlEvent>>,
-    stop_sender: Option<mpsc::Sender<()>>,
-    logger: SqlLogger, // SQL 이벤트 로거
+    table: Option<String>,
+    op: Option<SqlOp>,
+    /// 펼쳐진 상세 SQL.
+    details: Option<EventIdx>,
+    /// 펼쳐진 원본 hex. 덤프 문자열을 함께 들고 있어 매 프레임 다시 만들지 않는다.
+    raw: Option<(EventIdx, String)>,
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        Self {
+            view_mode: ViewMode::ByTable,
+            table: None,
+            op: None,
+            details: None,
+            raw: None,
+        }
+    }
+}
+
+impl Selection {
+    /// 현재 그룹화 기준.
+    #[must_use]
+    pub const fn view_mode(&self) -> ViewMode {
+        self.view_mode
+    }
+
+    /// 그룹화 기준을 바꾼다. 이전 기준의 그룹 선택은 의미가 없으므로 함께 지운다.
+    ///
+    /// 두 동작을 호출자에게 맡기면 "모드만 바꾸고 선택은 남기는" 상태가 생긴다.
+    pub fn set_view_mode(&mut self, mode: ViewMode) {
+        self.view_mode = mode;
+        self.reset();
+    }
+
+    /// 그룹 선택과 펼침 상태를 모두 초기화한다.
+    pub fn reset(&mut self) {
+        self.table = None;
+        self.op = None;
+        self.collapse();
+    }
+
+    /// 펼쳐 둔 항목만 접는다.
+    fn collapse(&mut self) {
+        self.details = None;
+        self.raw = None;
+    }
+
+    /// 현재 선택에 해당하는 인덱스를 저장소에서 **빌려서** 돌려준다.
+    ///
+    /// 예전에는 이 자리에서 `Vec<usize>`를 통째로 복사해 프레임마다 힙 할당이
+    /// 일어났다.
+    fn indices<'a>(&self, store: &'a EventStore) -> &'a [EventIdx] {
+        match self.view_mode {
+            ViewMode::ByTable => self
+                .table
+                .as_ref()
+                .map_or_else(|| store.all(), |name| store.table_group(name)),
+            ViewMode::ByOperation => self.op.map_or_else(|| store.all(), |op| store.op_group(op)),
+        }
+    }
+}
+
+/// 애플리케이션 상태. 소유권이 서로 다른 세 덩어리와 뷰 상태로 나뉘어 있다.
+///
+/// 필드는 비공개다. 공개하면 바깥에서 `store.clear()`만 호출해 `Selection`에
+/// 오래된 `EventIdx`를 남길 수 있는데, 그 불변식은 [`Self::begin_capture`]가
+/// 유일하게 지킨다.
+pub struct GuiState {
+    store: EventStore,
+    sel: Selection,
+    cap: Capture,
+    ifaces: Interfaces,
 }
 
 impl GuiState {
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        let interfaces = Extractor::list_interfaces().unwrap_or_default();
+    /// 인터페이스를 조회한 실사용 상태를 만든다.
+    #[must_use]
+    pub fn detect() -> Self {
         Self {
-            events: Vec::new(),
-            unique_sql_map: HashMap::new(),
-            table_groups: HashMap::new(),
-            operation_groups: HashMap::new(),
-            view_mode: ViewMode::ByTable,
-            selected_table: None,
-            selected_operation: None,
-            show_details: None,
-            show_raw: None,
-            is_capturing: false,
-            capture_started: false,
-            processing_status: String::new(),
-            selected_interface: interfaces.first().map(|(name, _)| name.clone()),
-            available_interfaces: interfaces,
-            event_receiver: None,
-            stop_sender: None,
-            logger: SqlLogger::new(),
+            store: EventStore::default(),
+            sel: Selection::default(),
+            cap: Capture::default(),
+            ifaces: Interfaces::detect(),
         }
     }
 
-    /// 이벤트 수신기 설정
-    pub fn set_event_receiver(&mut self, receiver: mpsc::Receiver<SqlEvent>) {
-        self.event_receiver = Some(receiver);
+    /// 캡처가 진행 중인가.
+    #[must_use]
+    pub const fn is_capturing(&self) -> bool {
+        self.cap.is_running()
     }
 
-    /// 중지 sender 설정
-    pub fn set_stop_sender(&mut self, sender: mpsc::Sender<()>) {
-        self.stop_sender = Some(sender);
+    /// 캡처를 중지하고 로그를 마무리한다 (창을 닫을 때 등).
+    pub fn shutdown(&mut self) {
+        self.cap.stop(&mut self.store);
     }
 
-    /// 캡처 시작
-    pub fn start_capture(&mut self) {
-        if self.is_capturing || self.selected_interface.is_none() {
+    /// 이전 결과를 비우고 새 캡처를 시작한다.
+    ///
+    /// "저장소를 비우면 선택도 반드시 초기화해야 한다"는 불변식의 **유일한**
+    /// 시행 지점이다. 두 호출이 흩어지면 오래된 `EventIdx`가 남는다.
+    ///
+    /// 인터페이스 이름을 인자로 받지 않고 직접 읽는다. 밖에서 읽어 넘기면
+    /// `&self.ifaces` 빌림이 이 호출을 넘길 수 없어 이름을 복사해야 한다.
+    fn begin_capture(&mut self) {
+        let Some(interface) = self.ifaces.selected() else {
             return;
-        }
-
-        // 기존 데이터 초기화
-        self.events.clear();
-        self.unique_sql_map.clear();
-        self.table_groups.clear();
-        self.operation_groups.clear();
-        self.selected_table = None;
-        self.selected_operation = None;
-        self.show_details = None;
-        self.show_raw = None;
-
-        // 로그 파일 생성
-        match self.logger.start_capture(self.selected_interface.as_ref()) {
-            Ok(log_filename) => {
-                self.processing_status = format!("캡처 시작 중... (로그: {})", log_filename);
-            }
-            Err(e) => {
-                self.processing_status = format!("캡처 시작 중... (로그 파일 생성 실패: {})", e);
-            }
-        }
-
-        self.is_capturing = true;
-        self.capture_started = false;
-    }
-
-    /// 캡처 중지
-    pub fn stop_capture(&mut self) {
-        if !self.is_capturing {
-            return;
-        }
-
-        if let Some(ref sender) = self.stop_sender {
-            let _ = sender.send(());
-        }
-
-        // 로그 파일에 종료 메시지 작성
-        self.logger.stop_capture(self.events.len());
-
-        let log_file_info = if let Some(path) = self.logger.get_file_path() {
-            format!(" (로그: {})", path)
-        } else {
-            String::new()
         };
+        // 서로 다른 필드라 `ifaces` 빌림과 겹치지 않는다.
+        self.store.clear();
+        self.sel.reset();
+        self.cap.start(interface);
+    }
+}
 
-        self.is_capturing = false;
-        self.capture_started = false;
-        self.processing_status = format!(
-            "캡처 중지됨 (총 {}개 이벤트){}",
-            self.events.len(),
-            log_file_info
-        );
+/// GUI 전체를 그린다.
+pub fn show_gui(ctx: &Context, state: &mut GuiState) {
+    if state.cap.poll(&mut state.store) {
+        // 회수 예산이 남은 이벤트를 남겼다. 다음 주기를 기다리지 말고 곧바로
+        // 다시 그려서 큐가 밀리지 않게 한다.
+        ctx.request_repaint();
     }
 
-    /// 새 이벤트 추가 (중복 제거 및 그룹화)
-    pub fn add_event(&mut self, event: SqlEvent) {
-        // 중복 체크: 같은 SQL 텍스트가 이미 있으면 추가하지 않음
-        let sql_key = event.sql_text.trim().to_string();
-        let unique_idx = if let Some(&existing_idx) = self.unique_sql_map.get(&sql_key) {
-            // 이미 존재하는 SQL이면 기존 인덱스 사용
-            existing_idx
-        } else {
-            // 새로운 고유 SQL이면 추가
-            let idx = self.events.len();
-            self.events.push(event);
-            self.unique_sql_map.insert(sql_key, idx);
-            idx
-        };
+    egui::TopBottomPanel::top("control_panel").show(ctx, |ui| {
+        control_panel(ui, state);
+    });
 
-        let event = &self.events[unique_idx];
-
-        // 새로운 고유 SQL이 추가되었을 때만 로깅
-        if unique_idx == self.events.len() - 1 {
-            self.logger.log_event(event);
-        }
-
-        // 테이블별 그룹화 (TB_ 다음 부분이 테이블명)
-        // event.tables가 비어있으면 SQL 텍스트에서 직접 추출
-        let tables = if event.tables.is_empty() {
-            extract_tables_from_sql(&event.sql_text)
-        } else {
-            event.tables.clone()
-        };
-
-        // 중복 체크: 이미 그룹에 있으면 추가하지 않음
-        if tables.is_empty() {
-            let group = self.table_groups.entry("기타".to_string()).or_default();
-            if !group.contains(&unique_idx) {
-                group.push(unique_idx);
-            }
-        } else {
-            for table in &tables {
-                let table_name = extract_table_name(table);
-                let group = self.table_groups.entry(table_name).or_default();
-                if !group.contains(&unique_idx) {
-                    group.push(unique_idx);
-                }
-            }
-        }
-
-        // SQL별 그룹화 (한 쿼리에 여러 operation이 있으면 각 그룹에 포함)
-        let operations = extract_operations(&event.sql_text);
-        if operations.is_empty() {
-            // operation이 없으면 기존 operation 필드 사용
-            let group = self
-                .operation_groups
-                .entry(event.operation.clone())
-                .or_default();
-            if !group.contains(&unique_idx) {
-                group.push(unique_idx);
-            }
-        } else {
-            // 추출된 모든 operation에 추가
-            for op in operations {
-                let group = self.operation_groups.entry(op).or_default();
-                if !group.contains(&unique_idx) {
-                    group.push(unique_idx);
-                }
-            }
-        }
+    if state.store.is_empty() {
+        CentralPanel::default().show(ctx, |ui| empty_state(ui, state.cap.is_running()));
+        return;
     }
 
-    /// 실시간 이벤트 수신 처리
-    pub fn process_received_events(&mut self) {
-        let mut new_events = Vec::new();
+    SidePanel::left("group_panel")
+        .default_width(280.0)
+        .show(ctx, |ui| {
+            // &EventStore(읽기) + &mut Selection(쓰기)를 동시에 넘긴다.
+            group_sidebar(ui, &state.store, &mut state.sel);
+        });
 
-        // 먼저 모든 이벤트를 수집
-        if let Some(receiver) = &mut self.event_receiver {
-            while let Ok(event) = receiver.try_recv() {
-                new_events.push(event);
+    CentralPanel::default().show(ctx, |ui| {
+        sql_list(ui, ctx, &state.store, &mut state.sel);
+    });
+}
+
+fn control_panel(ui: &mut Ui, state: &mut GuiState) {
+    ui.heading("MSSQL TDS SQL 추출기");
+
+    ui.horizontal(|ui| {
+        ui.label("네트워크 인터페이스:");
+        interface_combo(ui, &mut state.ifaces, state.cap.is_running());
+        ui.separator();
+
+        if state.cap.is_running() {
+            if ui.button("중지").clicked() {
+                state.cap.stop(&mut state.store);
+            }
+            ui.spinner();
+        } else {
+            let can_start = state.ifaces.selected().is_some();
+            if ui
+                .add_enabled(can_start, egui::Button::new("시작"))
+                .clicked()
+            {
+                state.begin_capture();
             }
         }
+    });
 
-        // 수집한 이벤트들을 추가
-        for event in new_events {
-            self.add_event(event);
-            if !self.capture_started {
-                self.capture_started = true;
-            }
-            self.processing_status = format!("캡처 중... ({}개 이벤트)", self.events.len());
-        }
+    // Npcap 미설치·권한 부족은 가장 흔한 실패다. GUI에는 콘솔이 없으므로
+    // 로그가 아니라 화면에 이유를 보여준다.
+    if let Some(error) = state.ifaces.error() {
+        ui.colored_label(ERROR_COLOR, format!("인터페이스를 열 수 없습니다: {error}"));
     }
 
-    /// 선택된 그룹의 고유 SQL 인덱스 가져오기
-    fn get_selected_events(&self) -> Vec<usize> {
-        match self.view_mode {
-            ViewMode::ByTable => {
-                if let Some(ref table) = self.selected_table {
-                    self.table_groups.get(table).cloned().unwrap_or_default()
-                } else {
-                    // 중복 제거된 모든 이벤트
-                    (0..self.events.len()).collect()
+    status_label(ui, state.cap.status());
+
+    if !state.store.is_empty() {
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("보기 모드:");
+            for (mode, label) in [
+                (ViewMode::ByTable, "테이블별"),
+                (ViewMode::ByOperation, "작업별"),
+            ] {
+                if ui
+                    .selectable_label(state.sel.view_mode() == mode, label)
+                    .clicked()
+                {
+                    state.sel.set_view_mode(mode);
                 }
             }
-            ViewMode::BySql => {
-                if let Some(ref operation) = self.selected_operation {
-                    self.operation_groups
-                        .get(operation)
-                        .cloned()
-                        .unwrap_or_default()
-                } else {
-                    // 중복 제거된 모든 이벤트
-                    (0..self.events.len()).collect()
+        });
+    }
+}
+
+fn interface_combo(ui: &mut Ui, ifaces: &mut Interfaces, locked: bool) {
+    egui::ComboBox::from_id_source("interface_select")
+        .selected_text(ifaces.selected().unwrap_or("선택 안 됨"))
+        .show_ui(ui, |ui| {
+            // 캡처 중에는 위젯 자체를 비활성화한다. 클릭을 받아 놓고 무시하면
+            // 눌리는 것처럼 보인다.
+            ui.add_enabled_ui(!locked, |ui| {
+                // 선택은 인덱스로 한다. 이름을 복사해 돌려줄 필요가 없다.
+                let mut pick = None;
+                for (index, (name, desc)) in ifaces.available().iter().enumerate() {
+                    let selected = ifaces.is_selected(index);
+                    if ui
+                        .selectable_label(selected, format!("{name} - {desc}"))
+                        .clicked()
+                    {
+                        pick = Some(index);
+                    }
                 }
+                if let Some(index) = pick {
+                    ifaces.select(index);
+                }
+            });
+        });
+}
+
+/// 캡처 상태를 사람이 읽을 문장으로 그린다.
+///
+/// 문장 조립은 표시를 담당하는 여기서 한다. `Capture`는 무슨 일이 있었는지만
+/// 알고 어떻게 보일지는 모른다.
+fn status_label(ui: &mut Ui, status: &CaptureStatus) {
+    match status {
+        CaptureStatus::Idle => {}
+        CaptureStatus::Running {
+            unique,
+            log,
+            log_error,
+        } => {
+            ui.label(format!(
+                "캡처 중... (고유 SQL {unique}개, 로그: {})",
+                log.display()
+            ));
+            if let Some(e) = log_error {
+                ui.colored_label(ERROR_COLOR, e);
             }
+        }
+        CaptureStatus::Stopped {
+            unique,
+            log,
+            log_error,
+        } => {
+            ui.label(format!(
+                "캡처 중지됨 (고유 SQL {unique}개, 로그: {})",
+                log.display()
+            ));
+            if let Some(e) = log_error {
+                ui.colored_label(ERROR_COLOR, e);
+            }
+        }
+        CaptureStatus::Failed { reason } => {
+            ui.colored_label(ERROR_COLOR, reason);
         }
     }
 }
 
-/// GUI 렌더링
-pub fn show_gui(ctx: &egui::Context, state: &mut GuiState) {
-    // 실시간 이벤트 처리
-    state.process_received_events();
+/// 오류 표시 색상.
+const ERROR_COLOR: Color32 = Color32::from_rgb(255, 120, 120);
 
-    // 제어 영역 (상단에 고정)
-    TopBottomPanel::top("control_panel").show(ctx, |ui| {
-        ui.heading("MSSQL TDS SQL 추출기");
+fn empty_state(ui: &mut Ui, capturing: bool) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(100.0);
+        if capturing {
+            ui.heading("패킷 캡처 중...");
+            ui.add_space(20.0);
+            ui.label("SQL 쿼리가 감지되면 여기에 표시됩니다.");
+            ui.spinner();
+        } else {
+            ui.heading("네트워크 캡처 대기 중");
+            ui.add_space(20.0);
+            ui.label("시작 버튼을 눌러 네트워크 캡처를 시작하세요");
+        }
+    });
+}
 
-        // 인터페이스 선택 및 캡처 제어
-        ui.horizontal(|ui| {
-            ui.label("네트워크 인터페이스:");
+fn group_sidebar(ui: &mut Ui, store: &EventStore, sel: &mut Selection) {
+    ui.heading(match sel.view_mode() {
+        ViewMode::ByTable => "테이블",
+        ViewMode::ByOperation => "작업 유형",
+    });
+    ui.separator();
 
-            let selected_text = if let Some(ref selected) = state.selected_interface {
-                // 선택된 인터페이스의 설명 찾기
-                state
-                    .available_interfaces
-                    .iter()
-                    .find(|(name, _)| name == selected)
-                    .map(|(name, desc)| format!("{} - {}", name, desc))
-                    .unwrap_or_else(|| selected.clone())
-            } else {
-                "선택 안 됨".to_string()
+    ScrollArea::vertical()
+        .id_source("group_scroll")
+        .show(ui, |ui| {
+            let all_selected = match sel.view_mode() {
+                ViewMode::ByTable => sel.table.is_none(),
+                ViewMode::ByOperation => sel.op.is_none(),
             };
-
-            egui::ComboBox::from_id_source("interface_select")
-                .selected_text(&selected_text)
-                .show_ui(ui, |ui| {
-                    for (name, desc) in &state.available_interfaces {
-                        let display_text = format!("{} - {}", name, desc);
-                        let is_selected = state.selected_interface.as_ref() == Some(name);
-
-                        if ui.selectable_label(is_selected, &display_text).clicked()
-                            && !state.is_capturing
-                        {
-                            state.selected_interface = Some(name.clone());
-                        }
-                    }
-                });
-
+            if ui
+                .selectable_label(all_selected, format!("전체 ({})", store.len()))
+                .clicked()
+            {
+                sel.reset();
+            }
             ui.separator();
 
-            if !state.is_capturing {
-                let can_start = state.selected_interface.is_some();
-                if ui
-                    .add_enabled(can_start, egui::Button::new("시작"))
-                    .clicked()
-                {
-                    state.start_capture();
+            match sel.view_mode() {
+                // store.tables()는 슬라이스를 빌려준다. 프레임마다 키를 복사하지 않는다.
+                ViewMode::ByTable => {
+                    let mut pick = None;
+                    for (name, group) in store.table_groups().take(MAX_RENDERED_GROUPS) {
+                        let selected = sel.table.as_deref() == Some(name);
+                        if ui
+                            .selectable_label(selected, format!("{name} ({})", group.len()))
+                            .clicked()
+                        {
+                            pick = Some((name.to_owned(), selected));
+                        }
+                    }
+                    if let Some((name, was_selected)) = pick {
+                        sel.table = (!was_selected).then_some(name);
+                        sel.collapse();
+                    }
+                    if store.table_group_count() > MAX_RENDERED_GROUPS {
+                        ui.label(format!(
+                            "... 그룹 {}개 중 {MAX_RENDERED_GROUPS}개만 표시",
+                            store.table_group_count()
+                        ));
+                    }
                 }
-            } else {
-                if ui.button("중지").clicked() {
-                    state.stop_capture();
+                // SqlOp::ALL 덕분에 표시 순서가 고정되고 변형 추가 시 누락되지 않는다.
+                ViewMode::ByOperation => {
+                    for op in SqlOp::ALL {
+                        let count = store.op_group(op).len();
+                        if count == 0 {
+                            continue;
+                        }
+                        let selected = sel.op == Some(op);
+                        if ui
+                            .selectable_label(selected, format!("{op} ({count})"))
+                            .clicked()
+                        {
+                            sel.op = (!selected).then_some(op);
+                            sel.collapse();
+                        }
+                    }
                 }
-                ui.spinner();
+            }
+        });
+}
+
+/// 한 번에 그릴 최대 행 수.
+///
+/// egui는 화면 밖 위젯도 레이아웃하므로, 수만 건이 쌓이면 프레임마다 수십 ms를
+/// 쓰게 된다. 그 스레드가 채널을 비우고 로그를 쓰는 스레드이기도 하다.
+const MAX_RENDERED_ROWS: usize = 500;
+
+/// 사이드바에 그릴 최대 그룹 수. 목록과 같은 이유로 상한이 필요하다 —
+/// 쿼리 하나가 수만 개의 테이블 그룹을 만들 수 있다.
+const MAX_RENDERED_GROUPS: usize = 300;
+
+/// 테이블을 식별하지 못했거나 그룹 상한을 넘긴 SQL이 모이는 그룹 이름.
+const UNGROUPED_LABEL: &str = crate::store::UNGROUPED;
+
+fn sql_list(ui: &mut Ui, ctx: &Context, store: &EventStore, sel: &mut Selection) {
+    let indices = sel.indices(store);
+    let title = match (sel.view_mode(), &sel.table, sel.op) {
+        (ViewMode::ByTable, Some(table), _) => format!("테이블: {table} ({}개)", indices.len()),
+        (ViewMode::ByOperation, _, Some(op)) => format!("작업 유형: {op} ({}개)", indices.len()),
+        _ => format!("전체 SQL 목록 ({}개)", indices.len()),
+    };
+    ui.heading(title);
+
+    ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .id_source("sql_list_scroll")
+        .show(ui, |ui| {
+            // 최신 항목이 위로 오도록 뒤에서부터, 상한까지만 그린다.
+            for &idx in indices.iter().rev().take(MAX_RENDERED_ROWS) {
+                if let Some(event) = store.get(idx) {
+                    sql_card(ui, ctx, event, idx, sel);
+                    ui.add_space(5.0);
+                }
+            }
+            if indices.len() > MAX_RENDERED_ROWS {
+                ui.separator();
+                ui.label(format!(
+                    "... {}개 중 최근 {MAX_RENDERED_ROWS}개만 표시합니다. \
+                     테이블/작업으로 좁히거나 로그 파일을 보세요.",
+                    indices.len()
+                ));
+            }
+            if store.overflow_table_names() > 0 {
+                ui.label(format!(
+                    "테이블 이름 {}건은 그룹 상한을 넘어 '{UNGROUPED_LABEL}'로 묶였습니다.",
+                    store.overflow_table_names()
+                ));
+            }
+            if store.over_capacity() > 0 {
+                ui.label(format!(
+                    "SQL {}건은 메모리 상한을 넘어 화면에 담지 않았습니다. \
+                     로그 파일에는 모두 기록되어 있습니다.",
+                    store.over_capacity()
+                ));
+            }
+        });
+}
+
+fn sql_card(ui: &mut Ui, ctx: &Context, event: &SqlEvent, idx: EventIdx, sel: &mut Selection) {
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            let op = event.primary_op();
+            let (r, g, b) = op.rgb();
+            ui.label(
+                RichText::new(op.as_str())
+                    .color(Color32::from_rgb(r, g, b))
+                    .strong(),
+            );
+            ui.separator();
+            // 아래 문자열들은 이벤트 생성 시점에 만들어 둔 것이다. 매 프레임
+            // 같은 `format!`을 다시 돌리지 않는다.
+            ui.label(event.timestamp_text());
+            ui.separator();
+            ui.label(event.flow_text());
+            if let Some(tables) = event.tables_text() {
+                ui.separator();
+                ui.label(tables);
             }
         });
 
-        if !state.processing_status.is_empty() {
-            ui.label(&state.processing_status);
-        }
+        ui.label(event.preview());
 
-        // 뷰 모드 탭 (데이터가 있을 때만 표시)
-        if !state.events.is_empty() {
+        ui.horizontal(|ui| {
+            if ui.button("상세 보기").clicked() {
+                sel.details = (sel.details != Some(idx)).then_some(idx);
+            }
+            if !event.raw().is_empty() && ui.button("원본 보기").clicked() {
+                // hex 덤프는 여는 순간 한 번만 만든다. 예전에는 패널이 열려 있는
+                // 동안 매 프레임 다시 만들었다 (request_repaint로 최대 프레임률).
+                sel.raw = match &sel.raw {
+                    Some((open, _)) if *open == idx => None,
+                    _ => Some((idx, bounded_hex_dump(event.raw()))),
+                };
+            }
+        });
+
+        if sel.details == Some(idx) {
             ui.separator();
-            ui.horizontal(|ui| {
-                ui.label("보기 모드:");
-                if ui
-                    .selectable_label(state.view_mode == ViewMode::ByTable, "테이블별")
-                    .clicked()
-                {
-                    state.view_mode = ViewMode::ByTable;
-                    state.selected_table = None;
-                    state.selected_operation = None;
-                    state.show_details = None;
-                    state.show_raw = None;
-                }
-                if ui
-                    .selectable_label(state.view_mode == ViewMode::BySql, "SQL별")
-                    .clicked()
-                {
-                    state.view_mode = ViewMode::BySql;
-                    state.selected_table = None;
-                    state.selected_operation = None;
-                    state.show_details = None;
-                    state.show_raw = None;
-                }
-            });
+            let (shown, truncated) = clip_chars(event.sql(), SQL_VIEW_CHARS);
+            // 복사는 언제나 전문을 넘긴다. 화면만 자른다.
+            read_only_block(ui, ctx, "전체 SQL:", shown, event.sql(), false);
+            if truncated {
+                ui.label(format!(
+                    "... 전체 {}바이트 중 앞 {SQL_VIEW_CHARS}자만 표시합니다. \
+                     전체는 로그 파일에 있고, 복사 버튼은 전문을 복사합니다.",
+                    event.sql().len()
+                ));
+            }
+        }
+        if let Some((open, dump)) = &sel.raw {
+            if *open == idx {
+                ui.separator();
+                read_only_block(ui, ctx, "원본 데이터 (Hex):", dump, dump, true);
+            }
         }
     });
+}
 
-    // 데이터가 있을 때만 표시
-    if !state.events.is_empty() {
-        // 왼쪽 패널: 그룹 목록
-        SidePanel::left("group_panel")
-            .resizable(true)
-            .default_width(300.0)
-            .min_width(200.0)
-            .max_width(500.0)
-            .show(ctx, |ui| {
-                match state.view_mode {
-                    ViewMode::ByTable => {
-                        ui.heading("테이블 목록");
-                        ScrollArea::vertical()
-                            .auto_shrink([false; 2])
-                            .id_source("table_list_scroll")
-                            .show(ui, |ui| {
-                                let mut tables: Vec<String> =
-                                    state.table_groups.keys().cloned().collect();
-                                tables.sort();
+/// hex 뷰에 표시할 최대 원본 바이트.
+///
+/// 덤프는 입력 1바이트당 약 4글자가 되므로, 멀티패킷 메시지(최대 4 MiB)를 그대로
+/// 그리면 16 MB짜리 텍스트를 매 프레임 레이아웃하게 된다.
+const HEX_VIEW_BYTES: usize = 16 * 1024;
 
-                                for table in &tables {
-                                    let count =
-                                        state.table_groups.get(table).map(|v| v.len()).unwrap_or(0);
-                                    let is_selected = state.selected_table.as_ref() == Some(table);
+/// 상세 보기에 표시할 최대 SQL 글자 수.
+///
+/// 멀티패킷 배치는 수 MB짜리 SQL이 될 수 있다. `TextEdit`은 문자열 전체의
+/// 레이아웃을 만들므로 그대로 넘기면 클릭 한 번에 화면이 멈춘다.
+const SQL_VIEW_CHARS: usize = 64 * 1024;
 
-                                    if ui
-                                        .selectable_label(
-                                            is_selected,
-                                            format!("{} ({})", table, count),
-                                        )
-                                        .clicked()
-                                    {
-                                        state.selected_table = if is_selected {
-                                            None
-                                        } else {
-                                            Some(table.clone())
-                                        };
-                                        state.show_details = None;
-                                        state.show_raw = None;
-                                    }
-                                }
+/// 문자 경계를 지키며 `max`자까지 잘라낸다. 잘렸는지도 함께 돌려준다.
+fn clip_chars(text: &str, max: usize) -> (&str, bool) {
+    match text.char_indices().nth(max) {
+        Some((byte, _)) => (&text[..byte], true),
+        None => (text, false),
+    }
+}
 
-                                // 전체 보기
-                                ui.separator();
-                                let total_count = state.events.len();
-                                let is_all_selected = state.selected_table.is_none();
-                                if ui
-                                    .selectable_label(
-                                        is_all_selected,
-                                        format!("전체 ({})", total_count),
-                                    )
-                                    .clicked()
-                                {
-                                    state.selected_table = None;
-                                    state.show_details = None;
-                                    state.show_raw = None;
-                                }
-                            });
-                    }
-                    ViewMode::BySql => {
-                        ui.heading("SQL 작업 유형");
-                        ScrollArea::vertical()
-                            .auto_shrink([false; 2])
-                            .id_source("operation_list_scroll")
-                            .show(ui, |ui| {
-                                let mut operations: Vec<String> =
-                                    state.operation_groups.keys().cloned().collect();
-                                operations.sort();
+/// 표시 상한을 적용한 hex 덤프.
+fn bounded_hex_dump(raw: &[u8]) -> String {
+    use std::fmt::Write as _;
 
-                                for operation in &operations {
-                                    let count = state
-                                        .operation_groups
-                                        .get(operation)
-                                        .map(|v| v.len())
-                                        .unwrap_or(0);
-                                    let is_selected =
-                                        state.selected_operation.as_ref() == Some(operation);
+    if raw.len() <= HEX_VIEW_BYTES {
+        return hex_dump(raw);
+    }
+    let mut dump = hex_dump(&raw[..HEX_VIEW_BYTES]);
+    let _ = write!(
+        dump,
+        "\n... (전체 {}바이트 중 앞 {HEX_VIEW_BYTES}바이트만 표시. 전체는 log/raw 로그 파일에 있습니다)",
+        raw.len()
+    );
+    dump
+}
 
-                                    if ui
-                                        .selectable_label(
-                                            is_selected,
-                                            format!("{} ({})", operation, count),
-                                        )
-                                        .clicked()
-                                    {
-                                        state.selected_operation = if is_selected {
-                                            None
-                                        } else {
-                                            Some(operation.clone())
-                                        };
-                                        state.show_details = None;
-                                        state.show_raw = None;
-                                    }
-                                }
-
-                                // 전체 보기
-                                ui.separator();
-                                let total_count = state.events.len();
-                                let is_all_selected = state.selected_operation.is_none();
-                                if ui
-                                    .selectable_label(
-                                        is_all_selected,
-                                        format!("전체 ({})", total_count),
-                                    )
-                                    .clicked()
-                                {
-                                    state.selected_operation = None;
-                                    state.show_details = None;
-                                    state.show_raw = None;
-                                }
-                            });
-                    }
-                }
-            });
-
-        // 오른쪽 중앙 패널: SQL 목록
-        CentralPanel::default().show(ctx, |ui| {
-            ui.push_id("sql_panel", |ui| {
-                let title = match state.view_mode {
-                    ViewMode::ByTable => {
-                        if let Some(ref table) = state.selected_table {
-                            format!(
-                                "테이블: {} ({}개)",
-                                table,
-                                state.get_selected_events().len()
-                            )
-                        } else {
-                            format!("전체 SQL 목록 ({}개)", state.events.len())
-                        }
-                    }
-                    ViewMode::BySql => {
-                        if let Some(ref operation) = state.selected_operation {
-                            format!(
-                                "작업 유형: {} ({}개)",
-                                operation,
-                                state.get_selected_events().len()
-                            )
-                        } else {
-                            format!("전체 SQL 목록 ({}개)", state.events.len())
-                        }
-                    }
-                };
-                ui.heading(&title);
-
-                // heading을 그린 후 남은 높이 계산
-                let sql_scroll_height = ui.available_height();
-
-                ScrollArea::vertical()
-                    .auto_shrink([false; 2])
-                    .max_height(sql_scroll_height)
-                    .id_source("sql_list_scroll")
-                    .show(ui, |ui| {
-                        let event_indices = state.get_selected_events();
-
-                        for &idx in &event_indices {
-                            let event = &state.events[idx];
-
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    // 작업 타입 색상
-                                    let color = match event.operation.as_str() {
-                                        "SELECT" => Color32::from_rgb(100, 200, 100),
-                                        "INSERT" => Color32::from_rgb(100, 150, 255),
-                                        "UPDATE" => Color32::from_rgb(255, 200, 100),
-                                        "DELETE" => Color32::from_rgb(255, 100, 100),
-                                        "EXEC" => Color32::from_rgb(200, 100, 255),
-                                        _ => Color32::GRAY,
-                                    };
-
-                                    ui.label(RichText::new(&event.operation).color(color).strong());
-                                    ui.separator();
-                                    ui.label(format!(
-                                        "{}",
-                                        event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
-                                    ));
-                                    ui.separator();
-                                    ui.label(&event.flow_id);
-
-                                    if !event.tables.is_empty() {
-                                        ui.separator();
-                                        ui.label(format!("테이블: {}", event.tables.join(", ")));
-                                    }
-                                });
-
-                                // SQL 미리보기
-                                let sql_preview = if event.sql_text.chars().count() > 200 {
-                                    event.sql_text.chars().take(200).collect::<String>() + "..."
-                                } else {
-                                    event.sql_text.clone()
-                                };
-                                ui.label(sql_preview);
-
-                                ui.horizontal(|ui| {
-                                    // 상세 보기 버튼
-                                    if ui.button("상세 보기").clicked() {
-                                        state.show_details = if state.show_details == Some(idx) {
-                                            None
-                                        } else {
-                                            Some(idx)
-                                        };
-                                    }
-
-                                    // 원본 보기 버튼
-                                    if event.raw_data.is_some() && ui.button("원본 보기").clicked()
-                                    {
-                                        state.show_raw = if state.show_raw == Some(idx) {
-                                            None
-                                        } else {
-                                            Some(idx)
-                                        };
-                                    }
-                                });
-
-                                // 상세 정보
-                                if state.show_details == Some(idx) {
-                                    ui.separator();
-                                    ui.group(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label("전체 SQL:");
-                                            if ui.button("복사").clicked() {
-                                                ctx.copy_text(event.sql_text.clone());
-                                            }
-                                        });
-                                        ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                                            let mut sql_text = event.sql_text.clone();
-                                            ui.add(
-                                                TextEdit::multiline(&mut sql_text)
-                                                    .desired_width(f32::INFINITY)
-                                                    .interactive(true),
-                                            );
-                                        });
-                                    });
-                                }
-
-                                // 원본 데이터 (Hex)
-                                if state.show_raw == Some(idx) {
-                                    if let Some(ref raw_data) = event.raw_data {
-                                        ui.separator();
-                                        ui.group(|ui| {
-                                            // Hex 문자열 생성 (16바이트씩 줄바꿈)
-                                            let hex_string: String = raw_data
-                                                .chunks(16)
-                                                .enumerate()
-                                                .map(|(i, chunk)| {
-                                                    let hex: String = chunk
-                                                        .iter()
-                                                        .map(|b| format!("{:02x}", b))
-                                                        .collect::<Vec<_>>()
-                                                        .join(" ");
-                                                    let offset = i * 16;
-                                                    format!("{:08x}:  {}", offset, hex)
-                                                })
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
-
-                                            ui.horizontal(|ui| {
-                                                ui.label("원본 데이터 (Hex):");
-                                                if ui.button("복사").clicked() {
-                                                    ctx.copy_text(hex_string.clone());
-                                                }
-                                            });
-                                            ScrollArea::vertical().max_height(300.0).show(
-                                                ui,
-                                                |ui| {
-                                                    let mut hex_text = hex_string;
-                                                    ui.add(
-                                                        TextEdit::multiline(&mut hex_text)
-                                                            .desired_width(f32::INFINITY)
-                                                            .font(egui::TextStyle::Monospace)
-                                                            .interactive(true),
-                                                    );
-                                                },
-                                            );
-                                        });
-                                    }
-                                }
-                            });
-
-                            ui.add_space(5.0);
-                        }
-                    });
-            });
+/// 복사 버튼이 달린 읽기 전용 텍스트 블록.
+fn read_only_block(
+    ui: &mut Ui,
+    ctx: &Context,
+    label: &str,
+    text: &str,
+    copy_text: &str,
+    monospace: bool,
+) {
+    ui.group(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            if ui.button("복사").clicked() {
+                ctx.copy_text(copy_text.to_string());
+            }
         });
-    } else {
-        // 테이블이 없을 때 중앙 패널 표시
-        CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(100.0);
-
-                if state.is_capturing {
-                    ui.heading("패킷 캡처 중...");
-                    ui.add_space(20.0);
-                    ui.label("SQL 쿼리가 감지되면 여기에 표시됩니다.");
-                    ui.spinner();
-                } else {
-                    ui.heading("네트워크 캡처 대기 중");
-                    ui.add_space(20.0);
-                    ui.label("시작 버튼을 눌러 네트워크 캡처를 시작하세요");
+        ScrollArea::vertical()
+            .max_height(300.0)
+            .id_source(label)
+            .show(ui, |ui| {
+                // `&str`도 TextBuffer라 사본이 필요 없다. 선택·복사는 되고 편집은
+                // 막힌다 — 예전에는 매 프레임 전문을 복사했고, 사용자가 입력하면
+                // 다음 프레임에 사라지는 유령 편집이 가능했다.
+                let mut shown = text;
+                let mut widget = TextEdit::multiline(&mut shown).desired_width(f32::INFINITY);
+                if monospace {
+                    widget = widget.font(egui::TextStyle::Monospace);
                 }
+                ui.add(widget);
             });
-        });
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tcp::{Endpoint, FlowId};
+    use chrono::Utc;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn event(sql: &str) -> SqlEvent {
+        let client = Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 50000);
+        let server = Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 1433);
+        let flow = FlowId::classify(client, server).unwrap().0;
+        SqlEvent::new(Utc::now(), flow, sql.to_string(), Vec::new())
+    }
+
+    #[test]
+    fn selection_narrows_the_visible_indices() {
+        let mut store = EventStore::default();
+        store.insert(event("SELECT * FROM dbo.TB_Users"));
+        store.insert(event("INSERT INTO dbo.TB_Logs VALUES (1)"));
+
+        let mut sel = Selection::default();
+        assert_eq!(sel.indices(&store).len(), 2, "선택이 없으면 전체");
+
+        sel.table = Some("Logs".to_string());
+        assert_eq!(sel.indices(&store).len(), 1);
+
+        sel.view_mode = ViewMode::ByOperation;
+        sel.op = Some(SqlOp::Select);
+        assert_eq!(sel.indices(&store).len(), 1);
+    }
+
+    #[test]
+    fn missing_group_yields_an_empty_selection() {
+        let store = EventStore::default();
+        let sel = Selection {
+            table: Some("없는테이블".to_string()),
+            ..Selection::default()
+        };
+        assert!(sel.indices(&store).is_empty());
+    }
+
+    #[test]
+    fn reset_clears_group_and_expansion_state() {
+        let mut sel = Selection {
+            table: Some("Users".to_string()),
+            op: Some(SqlOp::Select),
+            ..Selection::default()
+        };
+        sel.reset();
+        assert!(sel.table.is_none());
+        assert!(sel.op.is_none());
+        assert!(sel.details.is_none());
+        assert!(sel.raw.is_none());
     }
 }

@@ -1,11 +1,16 @@
-use rust_wireshark::gui::GuiState;
-use rust_wireshark::output::SqlEvent;
-use rust_wireshark::Extractor;
-use std::sync::mpsc;
-use std::thread;
+//! MSSQL TDS SQL 추출기 GUI 진입점.
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Windows 플랫폼 확인
+use rust_wireshark::gui::{show_gui, GuiState};
+use std::time::Duration;
+
+/// 한글 표시를 위해 시도할 Windows 시스템 폰트.
+const KOREAN_FONTS: [&str; 3] = [
+    "C:/Windows/Fonts/malgun.ttf", // 맑은 고딕
+    "C:/Windows/Fonts/gulim.ttc",  // 굴림
+    "C:/Windows/Fonts/batang.ttc", // 바탕
+];
+
+fn main() -> Result<(), eframe::Error> {
     if !cfg!(target_os = "windows") {
         eprintln!("오류: 이 프로그램은 Windows에서만 실행할 수 있습니다.");
         eprintln!("Error: This program can only run on Windows.");
@@ -23,96 +28,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "MSSQL TDS SQL 추출기",
         options,
         Box::new(|cc| {
-            let mut fonts = egui::FontDefinitions::default();
-
-            // Windows system font path trial
-            {
-                use std::path::Path;
-
-                let font_paths = [
-                    "C:/Windows/Fonts/malgun.ttf", // 맑은 고딕
-                    "C:/Windows/Fonts/gulim.ttc",  // 굴림
-                    "C:/Windows/Fonts/batang.ttc", // 바탕
-                ];
-
-                for font_path in &font_paths {
-                    if Path::new(font_path).exists() {
-                        if let Ok(font_data) = std::fs::read(font_path) {
-                            fonts
-                                .font_data
-                                .insert("Korean".to_owned(), egui::FontData::from_owned(font_data));
-                            fonts
-                                .families
-                                .get_mut(&egui::FontFamily::Proportional)
-                                .unwrap()
-                                .insert(0, "Korean".to_owned());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            cc.egui_ctx.set_fonts(fonts);
-
-            // Real-time event channel(thread)
-            let (event_tx, event_rx) = mpsc::channel();
-            // Stop signal channel(thread)
-            let (stop_tx, stop_rx) = mpsc::channel();
-
-            let mut state = GuiState::new();
-            state.set_event_receiver(event_rx);
-            state.set_stop_sender(stop_tx);
-            Box::new(GuiApp {
-                state,
-                event_sender: Some(event_tx),
-                stop_receiver: Some(stop_rx),
+            install_korean_font(&cc.egui_ctx);
+            Box::new(App {
+                state: GuiState::detect(),
             })
         }),
-    )?;
-
-    Ok(())
+    )
 }
 
-struct GuiApp {
+/// 시스템에 있는 첫 번째 한글 폰트를 UI 기본 글꼴 앞에 끼워 넣는다.
+fn install_korean_font(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // `read`가 이미 없는 파일에 실패하므로 `exists()` 사전 검사는 중복 syscall이자
+    // TOCTOU 창이다.
+    let loaded = KOREAN_FONTS
+        .iter()
+        .find_map(|path| std::fs::read(path).ok());
+
+    let Some(font_data) = loaded else {
+        return; // 한글 폰트가 없어도 프로그램은 동작한다
+    };
+
+    fonts
+        .font_data
+        .insert("Korean".to_owned(), egui::FontData::from_owned(font_data));
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.insert(0, "Korean".to_owned());
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// eframe 애플리케이션 껍데기.
+///
+/// 캡처 스레드와 채널은 [`GuiState`] 안의 `Capture`가 직접 소유하므로,
+/// 여기서 `Option<Sender>` / `Option<Receiver>` 조각을 들고 다닐 필요가 없다.
+struct App {
     state: GuiState,
-    event_sender: Option<mpsc::Sender<SqlEvent>>,
-    stop_receiver: Option<mpsc::Receiver<()>>,
 }
 
-impl eframe::App for GuiApp {
+/// 캡처 중일 때 채널을 확인하는 주기.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Handle capture start request
-        if self.state.is_capturing && !self.state.capture_started {
-            // If stop_receiver is None, create a new channel (for restart)
-            if self.stop_receiver.is_none() {
-                let (stop_tx, stop_rx) = mpsc::channel();
-                self.state.set_stop_sender(stop_tx);
-                self.stop_receiver = Some(stop_rx);
-            }
+        show_gui(ctx, &mut self.state);
 
-            if let (Some(ref interface), Some(ref sender)) =
-                (&self.state.selected_interface, &self.event_sender)
-            {
-                let interface = interface.clone();
-                let sender = sender.clone();
-                let stop_rx = self.stop_receiver.take();
-
-                thread::spawn(move || {
-                    let mut extractor = Extractor::new(true);
-
-                    if let Some(stop_rx) = stop_rx {
-                        // Start real-time capture (pass stop signal receiver)
-                        if let Err(e) = extractor.start_live_capture(&interface, sender, stop_rx) {
-                            eprintln!("캡처 오류: {}", e);
-                        }
-                    }
-                });
-
-                self.state.capture_started = true;
-            }
+        // 무조건 다시 그리면 유휴 상태에서도 CPU를 계속 태운다. 캡처 중일 때만
+        // 주기적으로 깨우고, 그 밖에는 egui의 입력 기반 갱신에 맡긴다.
+        if self.state.is_capturing() {
+            ctx.request_repaint_after(POLL_INTERVAL);
         }
+    }
 
-        rust_wireshark::gui::show_gui(ctx, &mut self.state);
-        ctx.request_repaint();
+    /// 창을 닫을 때 캡처를 정리한다.
+    ///
+    /// 그냥 드롭하면 채널에 남은 이벤트가 사라지고 로그 파일에 종료 푸터가
+    /// 남지 않는다.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.state.shutdown();
     }
 }

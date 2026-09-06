@@ -1,6 +1,8 @@
 # Rust Wireshark - MSSQL TDS SQL 추출기
 
-pcap/pcapng 파일에서 MSSQL TDS 프로토콜의 SQL 쿼리를 추출하는 Rust 도구입니다.
+네트워크 인터페이스를 실시간으로 캡처해 MSSQL TDS 프로토콜의 SQL 쿼리를 추출하는 Rust 도구입니다.
+TCP 스트림을 재조립하고 TDS 패킷을 프레이밍하므로, 여러 패킷에 걸친 긴 쿼리와
+`sp_executesql` RPC 파라미터도 복원합니다.
 > [!CAUTION]
 > 해당 프로그램은 윈도우 전용 프로그램입니다.  
 > mac에서 개발은 가능하지만 실행은 윈도우에서 해주세요.
@@ -68,6 +70,29 @@ GUI에서:
 2. **시작** 버튼을 클릭하여 처리 시작
 3. 처리 완료 후 테이블별로 그룹화된 결과 확인
 4. 왼쪽 테이블, SQL을 선택해서 테이블, SQL 별로 필터링하여 확인
+
+
+## 구조
+
+```
+pcap 캡처
+  └ extractor.rs   Ethernet/IPv4/TCP 파싱 (zero-copy), 캡처 루프
+      └ tcp.rs     플로우 정규화(FlowId::classify) + TCP 스트림 재조립
+          └ tds.rs TDS 프레이밍(멀티패킷 EOM), SQLBatch/RPC 디코딩
+              └ output.rs  SqlEvent - 테이블/작업 종류를 생성 시점에 한 번 계산
+                  ├ store.rs    중복 제거 + 테이블/작업별 그룹 인덱스
+                  ├ capture.rs  캡처 스레드 수명 관리, 인터페이스 목록
+                  ├ gui.rs      egui 렌더링 (읽기: EventStore / 쓰기: Selection)
+                  └ logging.rs  log/basic, log/raw 파일 기록
+```
+
+### 개발
+
+```bash
+cargo test                                                   # 단위 테스트
+cargo clippy --all-targets --all-features -- -W clippy::pedantic
+cargo fmt --all
+```
 
 ## 로그 파일
 
